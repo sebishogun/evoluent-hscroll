@@ -1,0 +1,11 @@
+[Unit]
+Description=Evoluent VM4 Horizontal Scroll Daemon
+After=default.target
+
+[Service]
+ExecStart=%h/.local/bin/evoluent-hscroll
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

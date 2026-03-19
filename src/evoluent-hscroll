@@ -1,0 +1,231 @@
+#!/usr/bin/python3
+"""Evoluent VM4 horizontal scroll daemon.
+
+Holds BTN_FORWARD + mouse X motion → emits REL_HWHEEL events via uinput.
+When cursor is on a browser tab bar, emits Ctrl+PageDown/PageUp to switch tabs.
+Quick tap of BTN_FORWARD passes through as a normal forward click.
+All other events pass through unchanged.
+"""
+
+import asyncio
+import json
+import signal
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+import evdev
+from evdev import UInput, ecodes
+
+VENDOR_ID = 0x1A7C
+PRODUCT_ID = 0x0191
+CONFIG_PATH = Path.home() / ".config" / "evoluent" / "config.json"
+
+BROWSER_CLASSES = {"firefox", "chromium", "google-chrome", "brave-browser", "vivaldi",
+                   "microsoft-edge", "zen", "zen-browser", "librewolf", "waterfox",
+                   "thorium-browser", "floorp"}
+
+TAB_BAR_HEIGHT = 50  # pixels from top of window
+
+DEFAULT_CONFIG = {
+    "sensitivity": 5,
+    "accumulator_threshold": 15,
+    "acceleration": False,
+    "tab_bar_height": TAB_BAR_HEIGHT,
+}
+
+
+def load_config():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(json.dumps(DEFAULT_CONFIG, indent=2) + "\n")
+        return dict(DEFAULT_CONFIG)
+    with open(CONFIG_PATH) as f:
+        cfg = json.load(f)
+    merged = {**DEFAULT_CONFIG, **cfg}
+    return merged
+
+
+def find_device():
+    for path in evdev.list_devices():
+        dev = evdev.InputDevice(path)
+        if dev.info.vendor == VENDOR_ID and dev.info.product == PRODUCT_ID:
+            return dev
+        dev.close()
+    return None
+
+
+def build_capabilities(device):
+    """Clone device capabilities, add hwheel and keyboard keys for tab switching."""
+    caps = device.capabilities(verbose=False)
+    caps.pop(ecodes.EV_SYN, None)
+
+    # Add horizontal scroll
+    rel_caps = set(caps.get(ecodes.EV_REL, []))
+    rel_caps.add(ecodes.REL_HWHEEL)
+    rel_caps.add(ecodes.REL_HWHEEL_HI_RES)
+    caps[ecodes.EV_REL] = list(rel_caps)
+
+    # Add keyboard keys for Ctrl+PageUp/PageDown tab switching
+    key_caps = set(caps.get(ecodes.EV_KEY, []))
+    key_caps.add(ecodes.KEY_LEFTCTRL)
+    key_caps.add(ecodes.KEY_PAGEUP)
+    key_caps.add(ecodes.KEY_PAGEDOWN)
+    caps[ecodes.EV_KEY] = list(key_caps)
+
+    return caps
+
+
+def check_browser_tab_bar(tab_bar_height):
+    """Check if cursor is on a browser tab bar. Returns True/False."""
+    try:
+        win_raw = subprocess.run(
+            ["hyprctl", "activewindow", "-j"],
+            capture_output=True, timeout=0.5,
+        )
+        cur_raw = subprocess.run(
+            ["hyprctl", "cursorpos", "-j"],
+            capture_output=True, timeout=0.5,
+        )
+        if win_raw.returncode != 0 or cur_raw.returncode != 0:
+            return False
+
+        win = json.loads(win_raw.stdout)
+        cur = json.loads(cur_raw.stdout)
+
+        win_class = win.get("class", "").lower()
+        if not any(browser in win_class for browser in BROWSER_CLASSES):
+            return False
+
+        win_y = win["at"][1]
+        cursor_y = cur["y"]
+        return cursor_y - win_y < tab_bar_height
+
+    except Exception:
+        return False
+
+
+def emit_tab_switch(ui, direction):
+    """Emit Ctrl+PageDown (right/next) or Ctrl+PageUp (left/prev)."""
+    key = ecodes.KEY_PAGEDOWN if direction > 0 else ecodes.KEY_PAGEUP
+    ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTCTRL, 1)
+    ui.write(ecodes.EV_KEY, key, 1)
+    ui.syn()
+    ui.write(ecodes.EV_KEY, key, 0)
+    ui.write(ecodes.EV_KEY, ecodes.KEY_LEFTCTRL, 0)
+    ui.syn()
+
+
+async def run(device, ui, config):
+    accumulator = 0
+    btn_forward_held = False
+    scrolled = False
+    # None = not checked yet, True/False = cached result for this hold
+    tab_bar_mode = None
+
+    async for event in device.async_read_loop():
+        sensitivity = config["sensitivity"]
+        threshold = config["accumulator_threshold"]
+        tab_height = config.get("tab_bar_height", TAB_BAR_HEIGHT)
+
+        # BTN_FORWARD press/release
+        if event.type == ecodes.EV_KEY and event.code == ecodes.BTN_FORWARD:
+            if event.value == 1:
+                btn_forward_held = True
+                scrolled = False
+                accumulator = 0
+                tab_bar_mode = None  # will check on first scroll tick
+            else:
+                btn_forward_held = False
+                if not scrolled:
+                    ui.write(ecodes.EV_KEY, ecodes.BTN_FORWARD, 1)
+                    ui.syn()
+                    ui.write(ecodes.EV_KEY, ecodes.BTN_FORWARD, 0)
+                    ui.syn()
+                accumulator = 0
+                tab_bar_mode = None
+            continue
+
+        # REL_X while BTN_FORWARD held
+        if (
+            event.type == ecodes.EV_REL
+            and event.code == ecodes.REL_X
+            and btn_forward_held
+        ):
+            # Check tab bar on first scroll movement of this hold
+            if tab_bar_mode is None:
+                tab_bar_mode = check_browser_tab_bar(tab_height)
+
+            accumulator += event.value
+            while abs(accumulator) >= threshold:
+                direction = 1 if accumulator > 0 else -1
+
+                if tab_bar_mode:
+                    emit_tab_switch(ui, direction)
+                else:
+                    ui.write(ecodes.EV_REL, ecodes.REL_HWHEEL, direction * sensitivity)
+                    ui.write(
+                        ecodes.EV_REL,
+                        ecodes.REL_HWHEEL_HI_RES,
+                        direction * sensitivity * 120,
+                    )
+                    ui.syn()
+
+                accumulator -= direction * threshold
+                scrolled = True
+            continue
+
+        # Suppress REL_Y while held to avoid vertical jitter
+        if (
+            event.type == ecodes.EV_REL
+            and event.code == ecodes.REL_Y
+            and btn_forward_held
+        ):
+            continue
+
+        # Everything else: pass through
+        ui.write_event(event)
+
+
+def main():
+    device = find_device()
+    if device is None:
+        print("Evoluent VM4 not found", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Found device: {device.name} at {device.path}")
+
+    config = load_config()
+    print(f"Config: sensitivity={config['sensitivity']}, threshold={config['accumulator_threshold']}")
+
+    caps = build_capabilities(device)
+    ui = UInput(caps, name="Evoluent VM4 Virtual", vendor=VENDOR_ID, product=PRODUCT_ID)
+
+    def reload_config(signum, frame):
+        new_config = load_config()
+        config.update(new_config)
+        print(f"Config reloaded: sensitivity={config['sensitivity']}, threshold={config['accumulator_threshold']}")
+
+    signal.signal(signal.SIGHUP, reload_config)
+
+    device.grab()
+    print("Device grabbed, entering event loop")
+
+    try:
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(run(device, ui, config))
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        print("Ungrabbing device")
+        try:
+            device.ungrab()
+        except OSError:
+            pass
+        ui.close()
+        device.close()
+
+
+if __name__ == "__main__":
+    main()
