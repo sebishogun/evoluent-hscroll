@@ -46,8 +46,8 @@ FILES = {
         "executable": False,
     },
     "udev": {
-        "src": SRC_DIR / "99-evoluent.rules",
-        "dst": UDEV_DIR / "99-evoluent.rules",
+        "src": SRC_DIR / "69-evoluent.rules",
+        "dst": UDEV_DIR / "69-evoluent.rules",
         "executable": False,
         "sudo": True,
     },

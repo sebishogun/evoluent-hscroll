@@ -154,7 +154,7 @@ Firefox, Chromium, Chrome, Brave, Zen, LibreWolf, Vivaldi, Edge, Waterfox, Thori
 | `~/.local/bin/evoluent-config` | Config CLI |
 | `~/.config/evoluent/config.json` | Sensitivity/threshold config |
 | `~/.config/systemd/user/evoluent-hscroll.service` | Systemd user service |
-| `/etc/udev/rules.d/99-evoluent.rules` | Device permission rules |
+| `/etc/udev/rules.d/69-evoluent.rules` | Device permission rules |
 
 ## Troubleshooting
 

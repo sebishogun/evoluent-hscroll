@@ -14,6 +14,7 @@ FILES_TO_REMOVE = [
 ]
 
 SUDO_FILES = [
+    Path("/etc/udev/rules.d/69-evoluent.rules"),
     Path("/etc/udev/rules.d/99-evoluent.rules"),
 ]
 

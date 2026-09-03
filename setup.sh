@@ -5,9 +5,9 @@ echo "=== Evoluent VM4 Horizontal Scroll Setup ==="
 
 # Create udev rules
 echo "Creating udev rules..."
-sudo tee /etc/udev/rules.d/99-evoluent.rules > /dev/null <<'EOF'
-SUBSYSTEM=="input", ATTRS{idVendor}=="1a7c", ATTRS{idProduct}=="0191", MODE="0660", GROUP="input"
-KERNEL=="uinput", MODE="0660", GROUP="input"
+sudo tee /etc/udev/rules.d/69-evoluent.rules > /dev/null <<'EOF'
+SUBSYSTEM=="input", ATTRS{idVendor}=="1a7c", ATTRS{idProduct}=="0191", MODE="0660", GROUP="input", TAG+="uaccess"
+KERNEL=="uinput", MODE="0660", GROUP="input", TAG+="uaccess"
 EOF
 
 # Add user to input group
